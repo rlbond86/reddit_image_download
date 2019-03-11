@@ -1,120 +1,232 @@
 #!/usr/bin/env python3
 
-
 import praw
-import os
-import re
 from unidecode import unidecode
 import requests
-from time import strftime,sleep
-import io
 from PIL import Image
 from PIL import ImageFont
 from PIL import ImageDraw
+
+from configparser import ConfigParser
+import os
+import re
+from time import strftime,sleep
+import io
 import sys
 import pickle
 import calendar
 import time
+import logging
 
+default_conf = """
+[multireddit]
+user=kjoneslol
+multi=sfwpornnetwork
 
-imageFolder = "~/reddit_images"
-dataFile_ = "~/.reddit_image_data"
-fontSize = 28
-numDownload = 120
-numRead = 250
+[limits]
+posts=250
+images=120
+age=7
+
+[processing]
+timestamp=yes
+title=yes
+username=yes
+subreddit=yes
+width=1920
+height=1080
+
+[title-font]
+name=/usr/share/fonts/truetype/roboto/hinted/Roboto-Black.ttf
+size=28
+
+[timestamp-font]
+name=/usr/share/fonts/truetype/roboto/hinted/Roboto-Black.ttf
+size=12
+
+[language-filter]
+subreddit=0
+username=*
+title=*
+
+[allow]
+over18=no
+
+[paths]
+images=~/reddit_images
+
+[logging]
+level=debug
+"""
+
+dataFile_ = ".reddit_image_data"
+
+url_exclusions = {
+    'cross-post': r"reddit\.com/r",
+    'non-file': r"/$",
+    'gif': r"\.gifv?$"
+}
+
+logging.basicConfig()
+log = logging.getLogger('reddit_image_download')
+
+domain_exclusions = r"[.^](gfycat|youtube)\.com$|^v\.redd\.it$"
+
+class Auth:
+    def __init__(self):
+        self.client_id = None
+        self.client_secret = None
+        self.user_agent = "reddit_image_download.py by /u/rlbond86"
+        
+    def readFromFile(self, filename):
+        with open(filename, 'r') as f:
+            lines = f.readlines()
+            self.client_id = lines[0].strip()
+            self.client_secret = lines[1].strip()
+            
+    def login(self):
+        r = praw.Reddit(client_id=self.client_id, 
+                        client_secret=self.client_secret, 
+                        user_agent=self.user_agent)
+        return r
+
 
 def main(authfile):
+
+    cp = ConfigParser()
+    cp.read_string(default_conf)
+    cp.read(os.path.expanduser('~/.config/reddit_image_download.conf'))
     
-    with open(authfile, 'r') as f:
-        lines = f.readlines()
-        cid = lines[0].strip()
-        csec = lines[1].strip()
+    log.setLevel(getattr(logging, cp['logging']['level'].upper()))
 
-    print("")
-    print("Reddit sfw_porn fetch, {}".format(strftime("%Y-%m-%d %H:%M:%S")))
+    log.info("reddit_image_download.py")
+    log.info("log level set to %s", cp['logging']['level'])
 
-    dataFile = os.path.expanduser(dataFile_)
-    excluded = set()
+    try:
+        if not os.path.exists(os.path.expanduser('~/.config/')):
+            os.makedirs(os.path.expanduser('~/.config/'))
+        with open(os.path.expanduser('~/.config/reddit_image_download.conf'), 'w') as f:
+            cp.write(f)
+            log.debug("wrote config")
+    except:
+        log.exception("error writing config file")
+
+    
+    auth = Auth()
+    auth.readFromFile(authfile)
+    r = auth.login()
+    log.info("connected to reddit")
+
+    imagePath = os.path.expanduser(cp['paths']['images'])
+    log.debug("using image path %s", imagePath)
+    dataFile = os.path.join(imagePath, dataFile_)
+    excluded_ids = set()
     try:
         with open(dataFile, 'rb') as f:
-            excluded = pickle.load(f)
-            print("- Loaded {} excluded files".format(len(excluded)))
+            excluded_ids = pickle.load(f)
+            log.info("loaded %d excluded files", len(excluded))
     except:
-        print("- Could not load excluded files list")
+        log.warning("could not load excluded files list")
 
-    fileLimit=numRead
+    fileLimit=cp.getint('limits', 'posts')
     download_bytes = 0
-    d = os.path.expanduser(imageFolder)
-    if not os.path.exists(d):
-        os.makedirs(d)
-    os.chdir(d)
+    if not os.path.exists(imagePath):
+        os.makedirs(imagePath)
+    os.chdir(imagePath)
      
     to_download = []
-    filenames = set()
+    filenames_to_download = set()
 
-    r = praw.Reddit(client_id=cid, client_secret=csec, user_agent="/u/rlbond86 image download script")
-    sfwp_mreddit = r.multireddit('rlbond86', 'sfwp_network')
-    submissions = sfwp_mreddit.hot(limit=fileLimit)
-    
+    mreddit = r.multireddit(cp['multireddit']['user'], cp['multireddit']['multi'])
+    submissions = mreddit.hot(limit=fileLimit)
+
+    domain_regex = re.compile(r"https?://([^/]+)[/$]")
+    domain_exclusion_regex = re.compile(domain_exclusions)
+    url_exclusion_regexes = {k:re.compile(v) for k,v in url_exclusions.items()}
     for s in submissions:
-        if s.over_18:
-            continue
-        if s.selftext_html is not None:
-            continue
-        if re.search(r'reddit.com/r', s.url):
-            continue
-        if s.url.endswith('/'):
-            continue
-        if s.url.endswith('.gif') or s.url.endswith('.gifv'):
-            continue
-        if calendar.timegm(time.gmtime()) - s.created_utc > 7*24*60*60:
-            # over a week old
-            continue
-            
         url = s.url
+        log.debug("submission %s: %s %s", s.id, url, s.title)
+        m = domain_regex.search(url)
+        if m is None:
+            log.warning("could not determine domain of %s", url)
+            continue;
+        domain = m.group(1)
+        if domain_exclusion_regex.search(domain):
+            log.debug("url excluded; skipping")
+            continue
+        
+        if s.over_18:
+            log.debug("over 18 content")
+            if not cp.getboolean('allow', 'over18'):
+                log.debug("over 18; skipping")
+                continue
+        
+        if s.selftext_html is not None:
+            log.debug("self post; skipping")
+            continue
+        
+        for reason,regex in url_exclusion_regexes.items():
+            if regex.search(url):
+                log.debug("url excluded: %s; skipping", reason)
+                continue;
+        
+        max_days = cp.getint('limits', 'age')
+        max_seconds = max_days * 24*60*60
+        if calendar.timegm(time.gmtime()) - s.created_utc > max_seconds:
+            log.debug("too old; skipping")
+            continue
+        
         if url == '':
+            log.warning("blank URL; skipping");
             continue
             
-        to_download.append({'url': url, 'title': s.title, 'user': s.author.name, 'created': s.created, 'subreddit': s.subreddit.display_name, 'id': s.id})
-        filenames.add(s.id)
+        username = "[deleted]" if s.author is None else s.author.name
+        to_download.append({'url': url, 'title': s.title, 'user': username, 'created': s.created, 'subreddit': s.subreddit.display_name, 'id': s.id})
+        filenames_to_download.add(s.id)
         
+    log.info("%d items in download list", len(to_download))
 
+    log.info("examining existing files")
     contents = os.listdir('.')
     keepfiles = set()
-    count = 0
     for filename in sorted(contents):
         deleteFile = True
         if os.path.isdir(filename):
             continue
-        for fname in [f for f in filenames if filename.startswith(f)]:
-            count += 1
+        if filename == dataFile_:
+            continue
+        for fname in [f for f in filenames_to_download if filename.startswith(f + '.')]:
+            log.debug("file %s already downloaded", fname)
             keepfiles.add(filename)
             deleteFile = False
             break
         if deleteFile:
-            print("- Deleting {}".format(filename))
+            log.info("deleting %s", filename)
             os.remove(filename)
     
-    print("- Keeping {} files".format(count))
-    kept = count
-
-    # remove excluded URLs
-    for entry in [entry for entry in to_download if entry['id'] in excluded]:
-        print("- Excluding {} ({})".format(entry['id'], unidecode(entry['title'])))
-    to_download = [entry for entry in to_download if entry['id'] not in excluded]
-    old_excluded = len(excluded)
-    excluded = set([entry for entry in excluded if entry in filenames])
-    if len(excluded) < old_excluded:
-        print("- Removed {} entries from excluded list".format(old_excluded - len(excluded)))
+    kept = len(keepfiles)
+    log.info("keeping %d files", kept)
     
+    # remove excluded URLs
+    for entry in [entry for entry in to_download if entry['id'] in excluded_ids]:
+        log.info("excluded id %s", entry['id'])
+    to_download = [entry for entry in to_download if entry['id'] not in excluded_ids]
+    old_excluded = len(excluded_ids)
+    excluded = set([entry for entry in excluded_ids if entry in filenames])
+    if len(excluded_ids) < old_excluded:
+        log.info("removed %d entries from excluded list", old_excluded - len(excluded))
     
     count = 0
     downloaded = 0
+    max_download = cp.getint('limits', 'images')
+    log.info("downloading images")
     for data in to_download:
-        if count >= numDownload:
+        if count >= max_download:
+            log.info("reached %d images", count)
             break
         
         if any([True for f in keepfiles if f.startswith(data['id'])]):
+            log.debug("already have %s", data['id'])
             # already got this file!
             count += 1
             continue
@@ -126,6 +238,7 @@ def main(authfile):
         unique_id = ''
         old_url = url
         if re.search('[./]flickr.com', url):
+            log.debug("found flickr base page, transforming url")
             flickr_filename = url.split('/')[-1]
             if '.' not in flickr_filename:
                 m = re.search(r'^.*flickr.com/photos/([^/]+)/([^/]+)', url)
@@ -133,71 +246,73 @@ def main(authfile):
                     mode = 'flickr'
                     unique_id = m.group(2)
                     url = m.group(0) + '/sizes/k'
+                    log.debug("new url %s", url)
        
         response = requests.get(url)
         download_bytes += len(response.content)
         
         # get stupid imgur source if this is a base page
         if re.search('imgur\.com', url):
+            log.debug("found imgur base page, finding source file")
             imgur_filename = url.split('/')[-1]
             if '.' not in imgur_filename:
                 #print response.content
                 # we need to get the actual imgur source file
                 m = re.search(r'(//i\.imgur\.com/{}\.[^"]+)"'.format(imgur_filename), response.content.decode('utf-8'))
                 if m:
-                    print("- Encountered imgur redirect: {} -> {}".format(url, m.group(1)))
+                    log.debug("encountered imgur redirect: %s -> %s}", url, m.group(1))
                     response = requests.get("https:{}".format(m.group(1)))
                     download_bytes += len(response.content)
                 else:
                     m = re.search(r'(//i\.imgur\.com/[a-zA-Z0-9]{2,}\.[^"]+)"', response.content.decode('utf-8'))
                     if m:
-                        print("- Trying album redirect: {} -> {}".format(url, m.group(1)))
+                        log.debug("trying album redirect: %s -> %s", url, m.group(1))
                         response = requests.get("https:{}".format(m.group(1)))
                         download_bytes += len(response.content)
                     else:
-                        print("- Could not get imgur redirect for {} ({})".format(url, unidecode(data['title'])))
+                        log.info("could not get imgur redirect for %s (%s)", url, data['title'])
         if mode == 'flickr':
             m = re.search(r'//[^"]+' + unique_id + r'[^"]+_d\.[^"]+', response.content.decode('utf-8'))
             if m:
-                print("- Trying flickr redirect: {} - {}".format(old_url, m.group(0)))
+                log.debug("trying flickr redirect: %s -> %s", old_url, m.group(0))
                 response = requests.get("https:{}".format(m.group(0)))
                 download_bytes += len(response.content)
             else:
-                print("- Could not get flickr redirect for {} ({})".format(url, unidecode(data['title'])))
+                log.info("could not get flickr redirect for %s (%s)", url, data['title'])
 
 
-        print("- Downloaded {} ({} - {}) ({} bytes)".format(url, unidecode(data['subreddit']), unidecode(data['title']), len(response.content)))
+        log.info("downloaded %s (%s - %s) (%d bytes)", url, data['subreddit'], data['title'], len(response.content))
         sleep(2)
 
         # edit data
         try:
             bio = io.BytesIO(response.content)
-            filename = editImage(bio, data)
+            filename = editImage(bio, data, cp)
             count += 1
             downloaded += 1
-            print("- Wrote {} ({})".format(filename, count))
+            log.debug("wrote %s (%d)", filename, count)
         except Exception as e:
-            print("! Error: {}, url={}".format(e, url))
+            log.exception("error: %s, url=%s", e, url)
             excluded.add(data['id'])
             bio.close()
 
     
-    print("- {} files total".format(kept + downloaded))
-    print("- Downloaded {} bytes total".format(download_bytes))
+    log.info("%d files total", kept + downloaded)
+    log.info("downloaded %d bytes total", download_bytes)
     with open(dataFile, "wb") as f:
         pickle.dump(excluded, f)
-    print("- {} files on exluded list".format(len(excluded)))
+    log.info("%d files on exluded list", len(excluded))
     
     
 
-def editImage(bio, data):
-    print("- Editing {}".format(data['id']))
+def editImage(bio, data, cp):
+    log.info("editing %s", data['id'])
     im = Image.open(bio).convert('RGBA')
     
     # resize image
     w,h = im.size
-    h_scale = 1080.0 / h
-    w_scale = 1920.0 / w
+    h_scale = cp.getfloat('processing', 'height') / h
+    w_scale = cp.getfloat('processing', 'width') / w
     scale = min(w_scale, h_scale)
     new_w = int(round(w * scale))
     new_h = int(round(h * scale))
@@ -211,8 +326,8 @@ def editImage(bio, data):
         
     # add text
     draw = ImageDraw.Draw(overlay)
-    font = ImageFont.truetype('/usr/share/fonts/truetype/roboto/hinted/Roboto-Black.ttf', fontSize)
-    timestamp_font = ImageFont.truetype('/usr/share/fonts/truetype/roboto/Roboto-Black.ttf', 12)
+    font = ImageFont.truetype(cp['title-font']['name'], cp.getint('title-font', 'size'))
+    timestamp_font = ImageFont.truetype(cp['timestamp-font']['name'], cp.getint('timestamp-font', 'size'))
     
     txt = data['title']
     txt_before = txt   
@@ -226,7 +341,7 @@ def editImage(bio, data):
     timestamp_w, timestamp_h = draw.textsize(timestamp, timestamp_font)
 
     if txt != txt_before:
-        print("- modified text: {} -> {}".format(unidecode(txt_before), unidecode(txt)))
+        log.info("modified text: %s -> %s", txt_before, txt)
     
     words = txt.split()
     subreddit = data['subreddit']
