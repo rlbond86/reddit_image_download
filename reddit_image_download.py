@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
+from code import config
+
 import praw
 from unidecode import unidecode
 import requests
 from PIL import Image
 from PIL import ImageFont
 from PIL import ImageDraw
-
-from configparser import ConfigParser
 import os
 import re
 from time import strftime,sleep
@@ -17,47 +17,6 @@ import pickle
 import calendar
 import time
 import logging
-
-default_conf = """
-[multireddit]
-user=kjoneslol
-multi=sfwpornnetwork
-
-[limits]
-posts=250
-images=120
-age=7
-
-[processing]
-timestamp=yes
-title=yes
-username=yes
-subreddit=yes
-width=1920
-height=1080
-
-[title-font]
-name=/usr/share/fonts/truetype/roboto/hinted/Roboto-Black.ttf
-size=28
-
-[timestamp-font]
-name=/usr/share/fonts/truetype/roboto/hinted/Roboto-Black.ttf
-size=12
-
-[language-filter]
-subreddit=0
-username=*
-title=*
-
-[allow]
-over18=no
-
-[paths]
-images=~/reddit_images
-
-[logging]
-level=debug
-"""
 
 dataFile_ = ".reddit_image_data"
 
@@ -93,25 +52,15 @@ class Auth:
 
 def main(authfile):
 
-    cp = ConfigParser()
-    cp.read_string(default_conf)
-    cp.read(os.path.expanduser('~/.config/reddit_image_download.conf'))
+    cp = config.getConfig()
     
     log.setLevel(getattr(logging, cp['logging']['level'].upper()))
 
     log.info("reddit_image_download.py")
     log.info("log level set to %s", cp['logging']['level'])
-
-    try:
-        if not os.path.exists(os.path.expanduser('~/.config/')):
-            os.makedirs(os.path.expanduser('~/.config/'))
-        with open(os.path.expanduser('~/.config/reddit_image_download.conf'), 'w') as f:
-            cp.write(f)
-            log.debug("wrote config")
-    except:
-        log.exception("error writing config file")
-
     
+    config.writeConfig(cp, log=log)
+
     auth = Auth()
     auth.readFromFile(authfile)
     r = auth.login()
