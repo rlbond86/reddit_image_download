@@ -10,6 +10,13 @@ def read_excluded(filename, log):
         log.warning("could not load excluded files list")
     return excluded_ids
 
+
+def write_excluded(filename, excluded, log):
+    with open(filename, "wb") as f:
+        pickle.dump(excluded, f)
+    log.info("%d files on exluded list", len(excluded))
+
+
 def remove_excluded(to_download, excluded_ids, log):
     for entry in [entry for entry in to_download if entry['id'] in excluded_ids]:
         log.info("excluded id %s", entry['id'])
