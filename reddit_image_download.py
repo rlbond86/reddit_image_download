@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
-from code import config
+from code.config import getConfig, writeConfig
 from code.auth import Auth
+from code.excluded import read_excluded
+from code.submissions import get_submissions, filter_submissions
 
 import praw
 from unidecode import unidecode
@@ -21,28 +23,19 @@ import logging
 
 dataFile_ = ".reddit_image_data"
 
-url_exclusions = {
-    'cross-post': r"reddit\.com/r",
-    'non-file': r"/$",
-    'gif': r"\.gifv?$"
-}
 
 logging.basicConfig()
 log = logging.getLogger('reddit_image_download')
 
-domain_exclusions = r"[.^](gfycat|youtube)\.com$|^v\.redd\.it$"
-
 
 def main(authfile):
 
-    cp = config.getConfig()
-    
-    log.setLevel(getattr(logging, cp['logging']['level'].upper()))
-
     log.info("reddit_image_download.py")
+
+    cp = getConfig(log=log)
+    log.setLevel(getattr(logging, cp['logging']['level'].upper()))
     log.info("log level set to %s", cp['logging']['level'])
-    
-    config.writeConfig(cp, log=log)
+    writeConfig(cp, log=log)
 
     auth = Auth()
     auth.readFromFile(authfile)
@@ -51,71 +44,25 @@ def main(authfile):
 
     imagePath = os.path.expanduser(cp['paths']['images'])
     log.debug("using image path %s", imagePath)
-    dataFile = os.path.join(imagePath, dataFile_)
-    excluded_ids = set()
-    try:
-        with open(dataFile, 'rb') as f:
-            excluded_ids = pickle.load(f)
-            log.info("loaded %d excluded files", len(excluded))
-    except:
-        log.warning("could not load excluded files list")
-
-    fileLimit=cp.getint('limits', 'posts')
-    download_bytes = 0
     if not os.path.exists(imagePath):
         os.makedirs(imagePath)
+        log.info("created path %s", imagePath)
     os.chdir(imagePath)
-     
+    log.info("changed to directory %s", imagePath)
+
+    excluded_ids = read_excluded(dataFile_, log=log)
+
+    download_bytes = 0
     to_download = []
     filenames_to_download = set()
 
-    mreddit = r.multireddit(cp['multireddit']['user'], cp['multireddit']['multi'])
-    submissions = mreddit.hot(limit=fileLimit)
-
-    domain_regex = re.compile(r"https?://([^/]+)[/$]")
-    domain_exclusion_regex = re.compile(domain_exclusions)
-    url_exclusion_regexes = {k:re.compile(v) for k,v in url_exclusions.items()}
-    for s in submissions:
-        url = s.url
-        log.debug("submission %s: %s %s", s.id, url, s.title)
-        m = domain_regex.search(url)
-        if m is None:
-            log.warning("could not determine domain of %s", url)
-            continue;
-        domain = m.group(1)
-        if domain_exclusion_regex.search(domain):
-            log.debug("url excluded; skipping")
-            continue
-        
-        if s.over_18:
-            log.debug("over 18 content")
-            if not cp.getboolean('allow', 'over18'):
-                log.debug("over 18; skipping")
-                continue
-        
-        if s.selftext_html is not None:
-            log.debug("self post; skipping")
-            continue
-        
-        for reason,regex in url_exclusion_regexes.items():
-            if regex.search(url):
-                log.debug("url excluded: %s; skipping", reason)
-                continue;
-        
-        max_days = cp.getint('limits', 'age')
-        max_seconds = max_days * 24*60*60
-        if calendar.timegm(time.gmtime()) - s.created_utc > max_seconds:
-            log.debug("too old; skipping")
-            continue
-        
-        if url == '':
-            log.warning("blank URL; skipping");
-            continue
-            
+    fileLimit=cp.getint('limits', 'posts')
+    submissions = get_submissions(r, fileLimit, cp)
+    
+    for s in filter_submissions(submissions, cp, log):
         username = "[deleted]" if s.author is None else s.author.name
-        to_download.append({'url': url, 'title': s.title, 'user': username, 'created': s.created, 'subreddit': s.subreddit.display_name, 'id': s.id})
+        to_download.append({'url': s.url, 'title': s.title, 'user': username, 'created': s.created, 'subreddit': s.subreddit.display_name, 'id': s.id})
         filenames_to_download.add(s.id)
-        
     log.info("%d items in download list", len(to_download))
 
     log.info("examining existing files")
