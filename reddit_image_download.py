@@ -2,9 +2,10 @@
 
 from code.config import getConfig, writeConfig
 from code.auth import Auth
-from code.excluded import read_excluded
+from code.excluded import read_excluded, remove_excluded
 from code.submissions import get_submissions, filter_submissions
 from code.filesys import delete_stale_images
+from code.download import download_image
 
 import praw
 from unidecode import unidecode
@@ -51,8 +52,6 @@ def main(authfile):
     os.chdir(imagePath)
     log.info("changed to directory %s", imagePath)
 
-    excluded_ids = read_excluded(dataFile_, log=log)
-
     download_bytes = 0
     to_download = []
     filenames_to_download = set()
@@ -69,16 +68,12 @@ def main(authfile):
     keepfiles = delete_stale_images(filenames_to_download, dataFile_, log)
     
     # remove excluded URLs
-    for entry in [entry for entry in to_download if entry['id'] in excluded_ids]:
-        log.info("excluded id %s", entry['id'])
-    to_download = [entry for entry in to_download if entry['id'] not in excluded_ids]
-    old_excluded = len(excluded_ids)
-    excluded = set([entry for entry in excluded_ids if entry in filenames])
-    if len(excluded_ids) < old_excluded:
-        log.info("removed %d entries from excluded list", old_excluded - len(excluded))
+    excluded = read_excluded(dataFile_, log=log)
+    remove_excluded(to_download, excluded, log)
     
     count = 0
     downloaded = 0
+    downlaod_bytes = 0
     max_download = cp.getint('limits', 'images')
     log.info("downloading images")
     for data in to_download:
@@ -92,58 +87,11 @@ def main(authfile):
             count += 1
             continue
 
-        url = data['url']
-       
-        # get stupid flickr source if this is a base page
-        mode = ''
-        unique_id = ''
-        old_url = url
-        if re.search('[./]flickr.com', url):
-            log.debug("found flickr base page, transforming url")
-            flickr_filename = url.split('/')[-1]
-            if '.' not in flickr_filename:
-                m = re.search(r'^.*flickr.com/photos/([^/]+)/([^/]+)', url)
-                if m and m.group(2) not in ['sets', 'items']:
-                    mode = 'flickr'
-                    unique_id = m.group(2)
-                    url = m.group(0) + '/sizes/k'
-                    log.debug("new url %s", url)
-       
-        response = requests.get(url)
-        download_bytes += len(response.content)
-        
-        # get stupid imgur source if this is a base page
-        if re.search('imgur\.com', url):
-            log.debug("found imgur base page, finding source file")
-            imgur_filename = url.split('/')[-1]
-            if '.' not in imgur_filename:
-                #print response.content
-                # we need to get the actual imgur source file
-                m = re.search(r'(//i\.imgur\.com/{}\.[^"]+)"'.format(imgur_filename), response.content.decode('utf-8'))
-                if m:
-                    log.debug("encountered imgur redirect: %s -> %s}", url, m.group(1))
-                    response = requests.get("https:{}".format(m.group(1)))
-                    download_bytes += len(response.content)
-                else:
-                    m = re.search(r'(//i\.imgur\.com/[a-zA-Z0-9]{2,}\.[^"]+)"', response.content.decode('utf-8'))
-                    if m:
-                        log.debug("trying album redirect: %s -> %s", url, m.group(1))
-                        response = requests.get("https:{}".format(m.group(1)))
-                        download_bytes += len(response.content)
-                    else:
-                        log.info("could not get imgur redirect for %s (%s)", url, data['title'])
-        if mode == 'flickr':
-            m = re.search(r'//[^"]+' + unique_id + r'[^"]+_d\.[^"]+', response.content.decode('utf-8'))
-            if m:
-                log.debug("trying flickr redirect: %s -> %s", old_url, m.group(0))
-                response = requests.get("https:{}".format(m.group(0)))
-                download_bytes += len(response.content)
-            else:
-                log.info("could not get flickr redirect for %s (%s)", url, data['title'])
-
-
-        log.info("downloaded %s (%s - %s) (%d bytes)", url, data['subreddit'], data['title'], len(response.content))
-        sleep(2)
+        responses = download_image(data, log)
+        if not responses:
+            continue
+        download_bytes += sum(len(x.content) for x in responses)
+        response = responses[-1]
 
         # edit data
         try:
@@ -153,7 +101,7 @@ def main(authfile):
             downloaded += 1
             log.debug("wrote %s (%d)", filename, count)
         except Exception as e:
-            log.exception("error: %s, url=%s", e, url)
+            log.exception("error: %s, url=%s", e, s.url)
             excluded.add(data['id'])
             bio.close()
 

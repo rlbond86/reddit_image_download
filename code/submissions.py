@@ -1,6 +1,7 @@
 import calendar
 import re
 import time
+from urllib.parse import urlparse
 
 def get_submissions(r, fileLimit, cp):
     mreddit = r.multireddit(cp['multireddit']['user'], cp['multireddit']['multi'])
@@ -12,11 +13,10 @@ _url_exclusions = {
     'non-file': r"/$",
     'gif': r"\.gifv?$"
 }
-_domain_exclusions = r"[.^](gfycat|youtube)\.com$|^v\.redd\.it$"
+_domain_exclusions = r"[.^](gfycat|youtube)\.com$|^v\.redd\.it$|^$"
 
 
 def filter_submissions(subs, cp, log):
-    domain_regex = re.compile(r"https?://([^/]+)[/$]")
     domain_exclusion_regex = re.compile(_domain_exclusions)
     url_exclusion_regexes = {k:re.compile(v) for k,v in _url_exclusions.items()}
     max_days = cp.getint('limits', 'age')
@@ -25,13 +25,9 @@ def filter_submissions(subs, cp, log):
     for s in subs:
         url = s.url
         log.debug("submission %s: %s %s", s.id, url, s.title)
-        m = domain_regex.search(url)
-        if m is None:
-            log.warning("could not determine domain of %s", url)
-            continue;
-        domain = m.group(1)
-        if domain_exclusion_regex.search(domain):
-            log.debug("url excluded; skipping")
+        domain = urlparse(url).hostname
+        if domain is None or domain_exclusion_regex.search(domain):
+            log.debug("domain %s excluded; skipping", domain)
             continue
         
         if s.over_18:
