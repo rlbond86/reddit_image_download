@@ -4,6 +4,7 @@ from code.config import getConfig, writeConfig
 from code.auth import Auth
 from code.excluded import read_excluded
 from code.submissions import get_submissions, filter_submissions
+from code.filesys import delete_stale_images
 
 import praw
 from unidecode import unidecode
@@ -65,26 +66,7 @@ def main(authfile):
         filenames_to_download.add(s.id)
     log.info("%d items in download list", len(to_download))
 
-    log.info("examining existing files")
-    contents = os.listdir('.')
-    keepfiles = set()
-    for filename in sorted(contents):
-        deleteFile = True
-        if os.path.isdir(filename):
-            continue
-        if filename == dataFile_:
-            continue
-        for fname in [f for f in filenames_to_download if filename.startswith(f + '.')]:
-            log.debug("file %s already downloaded", fname)
-            keepfiles.add(filename)
-            deleteFile = False
-            break
-        if deleteFile:
-            log.info("deleting %s", filename)
-            os.remove(filename)
-    
-    kept = len(keepfiles)
-    log.info("keeping %d files", kept)
+    keepfiles = delete_stale_images(filenames_to_download, dataFile_, log)
     
     # remove excluded URLs
     for entry in [entry for entry in to_download if entry['id'] in excluded_ids]:
