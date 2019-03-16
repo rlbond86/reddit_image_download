@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from code.config import getConfig, writeConfig
+from code.censor import censor_records
 from code.auth import Auth
 from code.excluded import read_excluded, write_excluded, remove_excluded
 from code.submissions import get_submissions, filter_submissions
@@ -13,6 +14,8 @@ import os
 import io
 import sys
 import logging
+from time import sleep
+import concurrent.futures
 
 dataFile_ = ".reddit_image_data"
 
@@ -43,7 +46,7 @@ def main(authfile):
     log.info("changed to directory %s", imagePath)
 
     download_bytes = 0
-    to_download = []
+    to_download_uncen = []
     filenames_to_download = set()
 
     fileLimit=cp.getint('limits', 'posts')
@@ -51,9 +54,13 @@ def main(authfile):
     
     for s in filter_submissions(submissions, cp, log):
         username = "[deleted]" if s.author is None else s.author.name
-        to_download.append({'url': s.url, 'title': s.title, 'user': username, 'created': s.created, 'subreddit': s.subreddit.display_name, 'id': s.id})
+        record = {'url': s.url, 'title': s.title, 'user': username, 'created': s.created, 'subreddit': s.subreddit.display_name, 'id': s.id}
+        to_download_uncen.append(record)
         filenames_to_download.add(s.id)
-    log.info("%d items in download list", len(to_download))
+    log.info("%d items in download list", len(to_download_uncen))
+    
+    log.info("censoring text...")
+    to_download = censor_records(to_download_uncen, cp, log)
 
     keepfiles = delete_stale_images(filenames_to_download, dataFile_, log)
     
@@ -94,6 +101,9 @@ def main(authfile):
             log.exception("error: %s, url=%s", e, s.url)
             excluded.add(data['id'])
             bio.close()
+            
+        # rate limiting
+        sleep(cp.getfloat('rate-limit', 'seconds'))
             
     log.info("%d files total", len(keepfiles) + downloaded)
     log.info("downloaded %d bytes total", download_bytes)

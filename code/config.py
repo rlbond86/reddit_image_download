@@ -29,10 +29,20 @@ size=28
 name=/usr/share/fonts/truetype/roboto/hinted/Roboto-Black.ttf
 size=12
 
-[language-filter]
-subreddit=0
-username=*
-title=*
+[subreddit-language-filter]
+filter=yes
+character=erase
+wholeword=no
+
+[user-language-filter]
+filter=yes
+character=*
+wholeword=no
+
+[title-language-filter]
+filter=yes
+character=*
+wholeword=yes
 
 [allow]
 over18=no
@@ -42,6 +52,9 @@ images=~/reddit_images
 
 [logging]
 level=info
+
+[rate-limit]
+seconds=2
 """
 
 def getConfigDirectory():

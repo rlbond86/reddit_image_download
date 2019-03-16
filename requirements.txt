@@ -2,3 +2,4 @@ praw==6.1.1
 pillow==5.1.0
 requests
 xdg
+profanityfilter
