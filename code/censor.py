@@ -6,10 +6,13 @@ _censors = {False: ProfanityFilter(no_word_boundaries=True),
             True:  ProfanityFilter(no_word_boundaries=False)}
 
 def censor_records(records_old, cp, log):
+    twoLetterWords = [item for item in _censors[False]._censor_list if len(item) <= 2]
     for k,pf in _censors.items():
-        # remove two-letter words
-        pf.remove_word('fu')
-        pf.remove_word('sx')
+        for word in twoLetterWords:
+            try:
+                pf.remove_word(word)
+            except ValueError:
+                pass
     
     records = deepcopy(records_old)
     categories = ('title', 'user', 'subreddit')
