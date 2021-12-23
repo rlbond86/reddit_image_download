@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
 from code.config import getConfig, writeConfig
-from code.censor import censor_records
+from code.censor import Censor
 from code.auth import Auth
-from code.excluded import read_excluded, write_excluded, remove_excluded
 from code.submissions import get_submissions, filter_submissions
-from code.filesys import delete_stale_images
+from code.filesys import try_remove_image
 from code.download import download_image
 from code.edit import edit_image
+from code.database import Database
 
 import praw
 import os
@@ -16,8 +16,6 @@ import sys
 import logging
 from time import sleep
 import concurrent.futures
-
-dataFile_ = ".reddit_image_data"
 
 logging.basicConfig()
 log = logging.getLogger('reddit_image_download')
@@ -45,46 +43,56 @@ def main(authfile):
     os.chdir(imagePath)
     log.info("changed to directory %s", imagePath)
 
-    download_bytes = 0
-    to_download_uncen = []
-    filenames_to_download = set()
+    db = Database(cp['paths']['database'])
+    n = db.delete_very_old_entries(cp.getint('limits','age')+30)
+    log.info(f'removed {n} old database entries')
+    n = db.exclude_old_entries(cp.getint('limits','age'))
+    log.info(f'excluded {n} images due to age')
 
-    fileLimit=cp.getint('limits', 'posts')
+    files = os.listdir('.')
+
+    fileLimit = cp.getint('limits', 'posts')
     submissions = get_submissions(r, fileLimit, cp)
     
+    download_bytes = 0
+    valid_urls = []
+
     for s in filter_submissions(submissions, cp, log):
         username = "[deleted]" if s.author is None else s.author.name
-        record = {'url': s.url, 'title': s.title, 'user': username, 'created': s.created, 'subreddit': s.subreddit.display_name, 'id': s.id}
-        to_download_uncen.append(record)
-        filenames_to_download.add(s.id)
-    log.info("%d items in download list", len(to_download_uncen))
-    
-    log.info("censoring text...")
-    to_download = censor_records(to_download_uncen, cp, log)
+        db.register_image(s.url, s.title, username, s.subreddit.display_name, s.id)
+        valid_urls.append(s.url)
+    log.info("%d items in download list", len(valid_urls))
 
-    keepfiles = delete_stale_images(filenames_to_download, dataFile_, log)
-    
-    # remove excluded URLs
-    excluded = read_excluded(dataFile_, log=log)
-    remove_excluded(to_download, excluded, log)
-    
-    count = 0
-    downloaded = 0
-    downlaod_bytes = 0
-    max_download = cp.getint('limits', 'images')
-    log.info("downloading images")
-    for data in to_download:
-        if count >= max_download:
-            log.info("reached %d images", count)
+    n = db.exclude_missing_urls(valid_urls)
+    log.info(f'excluded {n} images due to falling out of top posts')
+
+    untracked = db.get_untracked_files(files)
+    n = len(untracked)
+    log.info(f'deleting {n} images')
+    for filename in untracked:
+        try_remove_image(filename)
+        log.debug(f'deleted file {filename}')
+
+    cen = Censor(cp)
+
+    download_bytes = 0
+
+    while True:
+        next_file = db.get_next_to_download()
+        if next_file is None:
+            log.info("out of images")
             break
-        
-        if any([True for f in keepfiles if f.startswith(data['id'])]):
-            log.debug("already have %s", data['id'])
-            # already got this file!
-            count += 1
-            continue
 
-        responses = download_image(data, log)
+        n = db.get_image_count()
+        if n >= cp.getint('limits','images'):
+            log.info(f"reached {cp['limits']['images']} images")
+            break
+
+        log.debug(f"fetching {next_file['url']}")
+        record = {k:next_file[k] for k in next_file.keys()}
+        cen.censor_record(record, log)
+
+        responses = download_image(record, log)
         if not responses:
             continue
         download_bytes += sum(len(x.content) for x in responses)
@@ -93,21 +101,20 @@ def main(authfile):
         # edit data
         try:
             bio = io.BytesIO(response.content)
-            filename = edit_image(bio, data, cp, log)
-            count += 1
-            downloaded += 1
-            log.debug("wrote %s (%d)", filename, count)
+            filename = edit_image(bio, record, cp, log)
+            log.debug("wrote %s (%d)", filename, n+1)
+            db.track_image(record['url'], filename)
         except Exception as e:
-            log.exception("error: %s, url=%s", e, s.url)
-            excluded.add(data['id'])
+            log.exception("error: %s, url=%s", e, record['url'])
+            log.info(f"excluding {record['url']}")
+            db.exclude_url(record['url'])
             bio.close()
             
         # rate limiting
         sleep(cp.getfloat('rate-limit', 'seconds'))
             
-    log.info("%d files total", len(keepfiles) + downloaded)
+    log.info("%d files total", db.get_image_count())
     log.info("downloaded %d bytes total", download_bytes)
-    write_excluded(dataFile_, excluded, log)
     
     
 if __name__ == "__main__":

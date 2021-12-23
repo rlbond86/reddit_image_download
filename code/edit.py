@@ -5,7 +5,7 @@ import time
 import re
 
 def edit_image(bio, data, cp, log):
-    log.info("editing %s", data['id'])
+    log.info("editing %s", data['postid'])
     im = Image.open(bio).convert('RGBA')
     
     # resize image
@@ -76,7 +76,7 @@ def edit_image(bio, data, cp, log):
     result = Image.alpha_composite(im, overlay)
     rgb_result = result.convert('RGB')
     del draw
-    filename = data['id'] + '.jpg'
+    filename = data['postid'] + '.jpg'
     rgb_result.save(filename, quality=100)
     bio.close()
     return filename

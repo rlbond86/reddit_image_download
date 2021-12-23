@@ -49,6 +49,7 @@ over18=no
 
 [paths]
 images=~/reddit_images
+database=.images.db
 
 [logging]
 level=info

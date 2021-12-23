@@ -2,35 +2,33 @@ from profanityfilter import ProfanityFilter
 from copy import deepcopy
 import concurrent.futures
 
-_censors = {False: ProfanityFilter(no_word_boundaries=True),
-            True:  ProfanityFilter(no_word_boundaries=False)}
+class Censor:
+    def __init__(self, cp):
+        censors = {False: ProfanityFilter(no_word_boundaries=True),
+                   True:  ProfanityFilter(no_word_boundaries=False)}
+        twoLetterWords = [item for item in censors[False]._censor_list if len(item) <= 2]
 
-def censor_records(records_old, cp, log):
-    twoLetterWords = [item for item in _censors[False]._censor_list if len(item) <= 2]
-    for k,pf in _censors.items():
-        for word in twoLetterWords:
-            try:
-                pf.remove_word(word)
-            except ValueError:
-                pass
-    
-    records = deepcopy(records_old)
-    categories = ('title', 'user', 'subreddit')
-    for k in categories:
-        section = '{}-language-filter'.format(k)
-        if cp.getboolean(section, 'filter'):
-            pf = _censors[cp.getboolean(section, 'wholeword')]
-            censor_char = cp[section]['character']
-            if censor_char == 'erase':
-                censor_char = ''
-            pf.set_censor(censor_char)
-            old_text = [record[k] for record in records]
-            new_text = []
-            with concurrent.futures.ProcessPoolExecutor() as executor:
-                for out in executor.map(pf.censor, old_text):
-                    new_text.append(out)
-            for old, new, record in zip(old_text, new_text, records):
-                if old != new:
-                    record[k] = new
-                    log.info("censored %s from '%s' to '%s'", k, old, new)
-    return records
+        for k,pf in censors.items():
+            for word in twoLetterWords:
+                try:
+                    pf.remove_word(word)
+                except ValueError:
+                    pass
+        
+        self._censors = {}
+        for cat in ('title', 'user', 'subreddit'):
+            section = f'{cat}-language-filter'
+            if cp.getboolean(section, 'filter'):
+                self._censors[cat] = censors[cp.getboolean(section, 'wholeword')]
+                censor_char = cp[section]['character']
+                if censor_char == 'erase':
+                    censor_char = ''
+                self._censors[cat].set_censor(censor_char)
+
+
+    def censor_record(self, record, log):
+        for k,pf in self._censors.items():
+            new_text = pf.censor(record[k])
+            if new_text != record[k]:
+                log.info(f"censored {k} from '{record[k]}' to '{new_text}'")
+                record[k] = new_text
