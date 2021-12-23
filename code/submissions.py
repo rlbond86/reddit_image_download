@@ -1,4 +1,3 @@
-import calendar
 import re
 import time
 from urllib.parse import urlparse
@@ -19,8 +18,6 @@ _domain_exclusions = r"[.^](gfycat|youtube)\.com$|^v\.redd\.it$|^$"
 def filter_submissions(subs, cp, log):
     domain_exclusion_regex = re.compile(_domain_exclusions)
     url_exclusion_regexes = {k:re.compile(v) for k,v in _url_exclusions.items()}
-    max_days = cp.getint('limits', 'age')
-    max_seconds = max_days * 24*60*60
 
     for s in subs:
         url = s.url
@@ -44,10 +41,6 @@ def filter_submissions(subs, cp, log):
             if regex.search(url):
                 log.debug("url excluded: %s; skipping", reason)
                 continue;
-        
-        if calendar.timegm(time.gmtime()) - s.created_utc > max_seconds:
-            log.debug("too old; skipping")
-            continue
         
         if url == '':
             log.warning("blank URL; skipping");
