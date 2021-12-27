@@ -44,10 +44,14 @@ def main(authfile):
     log.info("changed to directory %s", imagePath)
 
     db = Database(cp['paths']['database'])
-    n = db.delete_very_old_entries(cp.getint('limits','age')+30)
-    log.info(f'removed {n} old database entries')
-    n = db.exclude_old_entries(cp.getint('limits','age'))
-    log.info(f'excluded {n} images due to age')
+    veryold = db.delete_very_old_entries(cp.getint('limits','age')+30)
+    log.info(f'removed {len(veryold)} old database entries')
+    for item in veryold:
+        log.debug(f'{item}')
+    old = db.exclude_old_entries(cp.getint('limits','age'))
+    log.info(f'excluded {len(old)} images due to age')
+    for item in old:
+        log.debug(f'{item}')
 
     files = os.listdir('.')
 
@@ -59,16 +63,17 @@ def main(authfile):
 
     for s in filter_submissions(submissions, cp, log):
         username = "[deleted]" if s.author is None else s.author.name
-        db.register_image(s.url, s.title, username, s.subreddit.display_name, s.id)
+        db.register_post(s.url, s.title, username, s.subreddit.display_name, s.id)
         valid_urls.append(s.url)
     log.info("%d items in download list", len(valid_urls))
 
-    n = db.exclude_missing_urls(valid_urls)
-    log.info(f'excluded {n} images due to falling out of top posts')
+    missing = db.exclude_unpopular_urls(valid_urls)
+    log.info(f'excluded {len(missing)} images due to falling out of top posts')
+    for item in missing:
+        log.debug('{postcode}: {title}'.format(**item))
 
     untracked = db.get_untracked_files(files)
-    n = len(untracked)
-    log.info(f'deleting {n} images')
+    log.info(f'deleting {len(untracked)} images')
     for filename in untracked:
         try_remove_image(filename)
         log.debug(f'deleted file {filename}')
@@ -107,7 +112,7 @@ def main(authfile):
         except Exception as e:
             log.exception("error: %s, url=%s", e, record['url'])
             log.info(f"excluding {record['url']}")
-            db.exclude_url(record['url'])
+            db.exclude_url(record['url'], e.__class__.__name__)
             bio.close()
             
         # rate limiting

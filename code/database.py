@@ -32,120 +32,274 @@ class Database:
     
     def delete_very_old_entries(self, num_days):
         with self._con:
-            c = self._con.execute("""DELETE FROM images
-                                     WHERE created < datetime('now', '-' || ? || ' days')""",
-                                     (num_days,))
-            return c.rowcount
-    
-    
+            where_query = """"""
+            c = self._con.execute("""   SELECT 
+                                            postcode, title
+                                        FROM 
+                                            posts
+                                        WHERE
+                                            lastseen < datetime('now', '-' || ? || ' days')""",
+                                  (num_days,))
+            result = c.fetchall()
+            self._con.execute("""   DELETE FROM
+                                        posts
+                                    WHERE
+                                        lastseen < datetime('now', '-' || ? || ' days')""",
+                              (num_days,))
+            return result
+            
+            
+    def _get_exclusion_sequence(self):
+        with self._con:
+            c = self._con.execute("""   SELECT 
+                                            max(sequence) 
+                                        FROM 
+                                            excluded""")
+            result = c.fetchone()[0]
+            return result if result is not None else 0
+            
+            
     def exclude_old_entries(self, num_days):
         with self._con:
-            c = self._con.execute("""UPDATE images
-                                     SET excluded = 1
-                                     WHERE created < datetime('now', '-' || ? || ' days')""",
-                                     (num_days,))
-            return c.rowcount
-    
-    
-    def exclude_url(self, url):
+            seq = self._get_exclusion_sequence() + 1
+            self._con.execute("""   INSERT OR IGNORE INTO 
+                                        excluded
+                                    SELECT 
+                                        posts.id, ?, 'old'
+                                    FROM
+                                        posts
+                                        JOIN localfiles
+                                            ON posts.id = localfiles.postid
+                                    WHERE
+                                        localfiles.timestamp < datetime('now', '-' || ? || ' days')""",
+                              (seq, num_days))
+            self._con.execute("""   DELETE FROM
+                                        localfiles
+                                    WHERE 
+                                        postid IN
+                                            (   SELECT 
+                                                    postid 
+                                                FROM
+                                                    excluded)""")
+            c = self._con.execute("""   SELECT
+                                            postcode, title
+                                        FROM 
+                                            posts
+                                            JOIN excluded
+                                                ON posts.id = excluded.postid
+                                        WHERE excluded.sequence = ?""",
+                                  (seq,))
+            return c.fetchall()
+            
+            
+    def exclude_unpopular_urls(self, urllist):
         with self._con:
-            self._con.execute("""UPDATE images
-                                 SET excluded = 1
-                                 where url = ?""",
-                                 (url,))
+            seq = self._get_exclusion_sequence() + 1
+            self._con.execute("""   DROP TABLE IF EXISTS
+                                        temp.urls_to_remove""")
+            self._con.execute("""   CREATE TABLE
+                                        temp.urls_to_remove
+                                    AS
+                                        SELECT
+                                            url, id, postcode, title
+                                        FROM
+                                            posts
+                                        WHERE
+                                            id NOT IN
+                                                (   SELECT 
+                                                        postid
+                                                    FROM
+                                                        excluded)""")
+            self._con.executemany("""   DELETE FROM
+                                            temp.urls_to_remove
+                                        WHERE
+                                            url = ?""",
+                                  ((url,) for url in urllist))
+            self._con.execute("""   INSERT OR IGNORE INTO
+                                        excluded
+                                    SELECT
+                                        id, ?, 'unpopular'
+                                    FROM
+                                        temp.urls_to_remove""",
+                              (seq,))
+            self._con.execute("""   DELETE FROM
+                                        localfiles
+                                    WHERE
+                                        postid in
+                                            (   SELECT
+                                                    postid
+                                                FROM
+                                                    excluded)""")
+            c = self._con.execute("""   SELECT
+                                            url, postcode, title
+                                        FROM
+                                            temp.urls_to_remove""")
+            result = c.fetchall()
+            self._con.execute("""DROP TABLE temp.urls_to_remove""")
+            
+            return result
+    
+    
+    def exclude_url(self, url, reason):
+        with self._con:
+            seq = self._get_exclusion_sequence() + 1
+            self._con.execute("""   INSERT OR REPLACE INTO
+                                        excluded
+                                    SELECT
+                                        id, ?, ?
+                                    FROM
+                                        posts
+                                    WHERE
+                                        url = ?""",
+                              (seq, reason, url))
     
     
     def set_filename(self, url, filename):
         with self._con:
-            self._con.execute("""UPDATE images
-                                 SET filename = ?
-                                 WHERE url = ?""",
-                                 (filename, url))
+            self._con.execute("""   INSERT OR REPLACE INTO
+                                        localfiles(postid, filename)
+                                    SELECT
+                                        id, ?
+                                    FROM
+                                        posts
+                                    WHERE
+                                        url = ?""",
+                              (filename, url))
                                  
                                  
     def get_next_to_download(self):
         with self._con:
-            c = self._con.execute("""SELECT * FROM images
-                                     WHERE excluded = 0 AND filename IS NULL
-                                     ORDER BY rowid
-                                     LIMIT 1""")
+            c = self._con.execute("""   WITH
+                                            tracked_posts
+                                        AS
+                                            (       SELECT
+                                                        postid AS id
+                                                    FROM
+                                                        localfiles
+                                                UNION
+                                                    SELECT
+                                                        postid AS id
+                                                    FROM
+                                                        excluded )
+                                        SELECT
+                                            posts.*
+                                        FROM
+                                            posts
+                                        WHERE
+                                            posts.id NOT IN tracked_posts
+                                        ORDER BY
+                                            posts.id
+                                        LIMIT 1""")
             return c.fetchone()
             
             
     def get_image_count(self):
         with self._con:
-            c = self._con.execute("""SELECT count(*) FROM images
-                                     WHERE excluded = 0 AND filename IS NOT NULL""")
+            c = self._con.execute("""   SELECT
+                                            count(*)
+                                        FROM
+                                            localfiles""")
             return c.fetchone()[0]
-    
-    
-    def exclude_missing_urls(self, urllist):
-        with self._con:
-            self._con.execute("""DROP TABLE IF EXISTS temp.urls""")
-            self._con.execute("""CREATE TABLE temp.urls(url TEXT PRIMARY KEY)""")
-            self._con.executemany("""INSERT OR IGNORE INTO temp.urls
-                                     VALUES(?)""",
-                                  ((url,) for url in urllist))
-            c = self._con.execute("""DELETE FROM images
-                                     WHERE url NOT IN
-                                        (SELECT url FROM temp.urls)""")
-            n = c.rowcount
-            self._con.execute("""DROP TABLE IF EXISTS temp.urls""")
-            
-            return n
     
     
     def get_untracked_files(self, filelist):
         with self._con:
-            self._con.execute("""DROP TABLE IF EXISTS temp.filenames""")
-            self._con.execute("""CREATE TABLE temp.filenames(filename TEXT PRIMARY KEY)""")
-            self._con.executemany("""INSERT INTO temp.filenames
-                                     VALUES(?)""",
+            self._con.execute("""   DROP TABLE IF EXISTS
+                                        temp.files_in_directory""")
+            self._con.execute("""   CREATE TABLE
+                                        temp.files_in_directory(
+                                            filename TEXT PRIMARY KEY)""")
+            self._con.executemany("""   INSERT INTO
+                                            temp.files_in_directory
+                                        VALUES(?)""",
                                   ((filename,) for filename in filelist))
-            c = self._con.execute("""SELECT temp.filenames.filename
-                                     FROM temp.filenames
-                                     LEFT JOIN images ON temp.filenames.filename = images.filename
-                                     WHERE images.filename IS NULL OR images.excluded = 1""")
-            return [item[0] for item in c.fetchall() if not os.path.splitext(item[0])[1].startswith(self._ext)]
+            c = self._con.execute("""   WITH
+                                            valid_files
+                                        AS
+                                            (   SELECT
+                                                    filename
+                                                FROM
+                                                    localfiles
+                                                WHERE
+                                                    postid NOT IN
+                                                        (   SELECT
+                                                                postid
+                                                            FROM
+                                                                excluded))
+                                        SELECT
+                                            filename
+                                        FROM
+                                            valid_files
+                                        WHERE
+                                            filename IN temp.files_in_directory""")
+            result = [item[0] for item in c.fetchall() if not os.path.splitext(item[0])[1].startswith(self._ext)]
+            self._con.execute("""DROP TABLE temp.files_in_directory""")
+            return result
     
     
-    def register_image(self, url, title, user, subreddit, postid):
+    def register_post(self, url, title, user, subreddit, postcode):
         with self._con:
-           self._con.execute("""INSERT OR IGNORE INTO images(title, user, subreddit, url, postid)
-                                VALUES(?,?,?,?,?)""", (title,user,subreddit,url,postid))
+           self._con.execute("""INSERT OR IGNORE INTO
+                                    posts(title, user, subreddit, url, postcode, lastseen)
+                                VALUES(?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                             (title, user, subreddit, url, postcode))
+           self._con.execute("""UPDATE
+                                    posts
+                                SET
+                                    lastseen = CURRENT_TIMESTAMP
+                                WHERE
+                                    url = ?""",
+                             (url,))
     
     
     def track_image(self, url, filename):
         with self._con:
-            self._con.execute("""UPDATE images
-                                 SET filename = ?
-                                 WHERE url = ?""", (filename, url))
+            self._con.execute("""   INSERT OR IGNORE INTO
+                                        localfiles
+                                    SELECT
+                                        id, ?, CURRENT_TIMESTAMP
+                                    FROM
+                                        posts
+                                    WHERE
+                                        url = ?""",
+                              (filename, url))
     
     
     def _update_from_ver0(self):
         # Nothing needs to be done for this case
-        pass
+        try:
+            os.remove(".reddit_image_data")
+        except:
+            pass
     
     
     def _clean_database(self):
         with self._con:
-            self._con.execute("""CREATE TABLE IF NOT EXISTS images(
-                                 rowid     INTEGER  PRIMARY KEY   AUTOINCREMENT,
-                                 filename  TEXT     UNIQUE,
-                                 title     TEXT     NOT NULL,
-                                 user      TEXT     NOT NULL,
-                                 subreddit TEXT     NOT NULL,
-                                 url       TEXT     UNIQUE   NOT NULL,
-                                 postid    TEXT     UNIQUE   NOT NULL,
-                                 created   DATETIME DEFAULT(CURRENT_TIMESTAMP),
-                                 excluded  INTEGER  DEFAULT(0))""")
-    
-            self._con.execute("""CREATE UNIQUE INDEX IF NOT EXISTS images_filename_idx
-                                 ON images(filename)""")
-            self._con.execute("""CREATE UNIQUE INDEX IF NOT EXISTS images_url_idx
-                                 ON images(url)""")
-    
+            self._con.execute("""CREATE TABLE IF NOT EXISTS posts(
+                                 id         INTEGER  PRIMARY KEY   AUTOINCREMENT,
+                                 title      TEXT     NOT NULL,
+                                 user       TEXT     NOT NULL,
+                                 subreddit  TEXT     NOT NULL,
+                                 url        TEXT     UNIQUE   NOT NULL,
+                                 postcode   TEXT     UNIQUE   NOT NULL,
+                                 lastseen   DATETIME NOT NULL)""")
+            self._con.execute("""CREATE TABLE IF NOT EXISTS excluded(
+                                 postid     INTEGER  REFERENCES posts(id)   NOT NULL,
+                                 sequence   INTEGER,
+                                 reason     TEXT)""")
+            self._con.execute("""CREATE TABLE IF NOT EXISTS localfiles(
+                                 postid     INTEGER  REFERENCES posts(id)   NOT NULL,
+                                 filename   TEXT     UNIQUE   NOT NULL,
+                                 timestamp  DATETIME NOT NULL)""")
+            self._con.execute("""CREATE UNIQUE INDEX IF NOT EXISTS excluded_postid_index
+                                 ON excluded(postid)""")
+            self._con.execute("""CREATE UNIQUE INDEX IF NOT EXISTS localfiles_postid_index
+                                 ON localfiles(postid)""")
+            self._con.execute("""CREATE UNIQUE INDEX IF NOT EXISTS localfiles_filename_index
+                                 ON localfiles(filename)""")
+            
             self._con.execute("VACUUM")
-            self._con.execute("PRAGMA user_version=1")
+            self._con.execute("PRAGMA user_version = 1")
+            self._con.execute("PRAGMA foreign_keys = ON")
 
 
